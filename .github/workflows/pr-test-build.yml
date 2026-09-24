@@ -1,0 +1,64 @@
+name: PR Test Build
+
+on:
+  pull_request:
+    branches:
+      - v3_openjdk
+    types:
+      - opened
+      - reopened
+      - synchronize
+
+concurrency:
+  group: pr-test-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pr-test-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout PR code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v3
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Download JRE 8 component
+        uses: dawidd6/action-download-artifact@v9
+        with:
+          workflow: build.yml
+          path: app_pojavlauncher/src/main/assets/components/jre
+          workflow_conclusion: completed
+          repo: AngelAuraMC/angelauramc-openjdk-build
+          branch: buildjre8
+          name: jre8-pojav
+
+      - name: Set up Gradle 9.6.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 9.6.1
+          validate-wrappers: false
+
+      - name: Update language list
+        run: |
+          ./scripts/languagelist_updater.sh
+          mkdir out
+
+      - name: Build Debug APK (test only)
+        run: |
+          gradle :app_pojavlauncher:assembleDebug
+          mv app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk out/app-debug.apk
+
+      - name: Upload PR test APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-${{ github.event.pull_request.number }}-test-apk
+          path: out/app-debug.apk
