@@ -134,6 +134,7 @@ static SDL_GL_GetProcAddress_t real_SDL_GL_GetProcAddress;
 
 static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
     if (real_SDL_GL_GetProcAddress == NULL) return NULL;
+    void *result = real_SDL_GL_GetProcAddress(proc);
     // The renderer selection cannot change mid-session, resolve the guard only once
     static int mobilegluesOverrideEnabled = -1;
     if (mobilegluesOverrideEnabled < 0) {
@@ -148,6 +149,18 @@ static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
             mobilegluesHandle = dlopen("libmobileglues.so", RTLD_NOLOAD);
         if (mobilegluesHandle != NULL) {
             void *direct = dlsym(mobilegluesHandle, proc);
+            // TEMP DIAGNOSTIC for the RenderPearl glGetError investigation, remove once aligned
+            if (strcmp(proc, "glGetError") == 0) {
+                Dl_info realInfo = {0};
+                Dl_info directInfo = {0};
+                dladdr(result, &realInfo);
+                dladdr(direct, &directInfo);
+                LOGI("Amethyst-Android: glGetError SDL real=%p (%s) dlsym=%p (%s)",
+                        result,
+                        realInfo.dli_fname ? realInfo.dli_fname : "unknown",
+                        direct,
+                        directInfo.dli_fname ? directInfo.dli_fname : "unknown");
+            }
             if (direct != NULL) {
                 static int overrideLogged = 0;
                 if (!overrideLogged) {
@@ -167,6 +180,9 @@ void *custom_dlsym(void *handle, const char *symbol) {
             dlsym_func_t,
             handle,
             symbol);
+    // TEMP DIAGNOSTIC for the RenderPearl glGetError investigation, remove once aligned
+    if (strcmp(symbol, "glGetError") == 0)
+        LOGI("Amethyst-Android: dlsym(glGetError) handle=%p result=%p", handle, result);
     LibraryRedirect *redirect = get_redirect_by_handle(handle);
     if ((redirect != NULL) && strcmp(symbol, "JNI_OnLoad") == 0) {
         if (strstr(redirect->library_name, "libSDL3")) {
