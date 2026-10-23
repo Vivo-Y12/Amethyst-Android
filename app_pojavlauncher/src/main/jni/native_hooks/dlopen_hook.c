@@ -148,7 +148,17 @@ static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
         if (mobilegluesHandle == NULL)
             mobilegluesHandle = dlopen("libmobileglues.so", RTLD_NOLOAD);
         if (mobilegluesHandle != NULL) {
-            void *direct = dlsym(mobilegluesHandle, proc);
+            // LWJGL's GL function provider prefers the driver's own eglGetProcAddress and
+            // only falls back to dlsym when it returns NULL, so the SDL side has to answer
+            // through the very same chain to keep RenderPearl's glGetError check consistent
+            static void *mobilegluesEglGetProcAddress;
+            if (mobilegluesEglGetProcAddress == NULL)
+                mobilegluesEglGetProcAddress = dlsym(mobilegluesHandle, "eglGetProcAddress");
+            void *direct = mobilegluesEglGetProcAddress != NULL
+                    ? ((void *(*)(const char *)) mobilegluesEglGetProcAddress)(proc)
+                    : NULL;
+            if (direct == NULL)
+                direct = dlsym(mobilegluesHandle, proc);
             // TEMP DIAGNOSTIC for the RenderPearl glGetError investigation, remove once aligned
             if (strcmp(proc, "glGetError") == 0) {
                 Dl_info realInfo = {0};
@@ -164,7 +174,7 @@ static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
             if (direct != NULL) {
                 static int overrideLogged = 0;
                 if (!overrideLogged) {
-                    LOGI("Amethyst-Android: Serving SDL GL lookups from libmobileglues symbols for RenderPearl");
+                    LOGI("Amethyst-Android: Serving SDL GL lookups through libmobileglues eglGetProcAddress for RenderPearl");
                     overrideLogged = 1;
                 }
                 return direct;
