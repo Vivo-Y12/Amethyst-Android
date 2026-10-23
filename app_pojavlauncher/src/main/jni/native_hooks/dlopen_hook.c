@@ -115,70 +115,81 @@ static JNI_OnLoad_t get_jni_onload_wrapper(
         return jni_onload_0;
     }
 
-        if (redirect == &libRedirectInfo[1]) {
-            return jni_onload_1;
-        }
-    
-        return NULL;
+    if (redirect == &libRedirectInfo[1]) {
+        return jni_onload_1;
     }
-    
-    // RenderPearl (26.x) aborts the GL backend when the glGetError pointer LWJGL resolved
-    // with plain dlsym differs from what SDL_GL_GetProcAddress hands out, because
-    // MobileGlues' eglGetProcAddress returns internal trampolines instead of its exported
-    // symbols. LWJGL resolves SDL_GL_GetProcAddress through a one-time dlsym in its SDL
-    // bindings, so replacing that dlsym result keeps every SDL GL lookup aligned with the
-    // driver's own symbols on the MobileGlues renderer.
-    typedef void *(*SDL_GL_GetProcAddress_t)(const char *proc);
-    
-    static SDL_GL_GetProcAddress_t real_SDL_GL_GetProcAddress;
-    
-    static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
-        if (real_SDL_GL_GetProcAddress == NULL) return NULL;
-        void *result = real_SDL_GL_GetProcAddress(proc);
+
+    return NULL;
+}
+
+// RenderPearl (26.x) aborts the GL backend when the glGetError pointer LWJGL resolved
+// with plain dlsym differs from what SDL_GL_GetProcAddress hands out, because
+// MobileGlues' eglGetProcAddress returns internal trampolines instead of its exported
+// symbols. LWJGL resolves SDL_GL_GetProcAddress through a one-time dlsym in its SDL
+// bindings, so replacing that dlsym result keeps every SDL GL lookup aligned with the
+// driver's own symbols on the MobileGlues renderer.
+typedef void *(*SDL_GL_GetProcAddress_t)(const char *proc);
+
+static SDL_GL_GetProcAddress_t real_SDL_GL_GetProcAddress;
+
+static void *custom_SDL_GL_GetProcAddress_Func(const char *proc) {
+    if (real_SDL_GL_GetProcAddress == NULL) return NULL;
+    // The renderer selection cannot change mid-session, resolve the guard only once
+    static int mobilegluesOverrideEnabled = -1;
+    if (mobilegluesOverrideEnabled < 0) {
         const char *renderer = getenv("AMETHYST_RENDERER");
-        if (renderer == NULL || strcmp(renderer, "opengles_mobileglues") != 0)
-            return result;
-        void *driverHandle = dlopen("libmobileglues.so", RTLD_NOLOAD | RTLD_LAZY);
-        if (driverHandle == NULL) return result;
-        void *direct = dlsym(driverHandle, proc);
-        if (direct == NULL) return result;
-        static int overrideLogged = 0;
-        if (!overrideLogged) {
-            LOGI("Serving SDL GL lookups from libmobileglues symbols for RenderPearl");
-            overrideLogged = 1;
-        }
-        return direct;
+        mobilegluesOverrideEnabled = renderer != NULL && strcmp(renderer, "opengles_mobileglues") == 0;
     }
-    
-    void *custom_dlsym(void *handle, const char *symbol) {
-        void *result = BYTEHOOK_CALL_PREV(
-                custom_dlsym,
-                dlsym_func_t,
-                handle,
-                symbol);
-    LibraryRedirect *redirect = get_redirect_by_handle(handle);
-        if ((redirect != NULL) && strcmp(symbol, "JNI_OnLoad") == 0) {
-            if (strstr(redirect->library_name, "libSDL3")) {
-                redirect->jni_onload = (JNI_OnLoad_t) result;
-                // This outputs in the minecraft logs
-                LOGI("Amethyst-Android: Intercepted dlsym on SDL3 JNI_OnLoad: %p", result);
-                BYTEHOOK_POP_STACK();
-                return get_jni_onload_wrapper(redirect);
+    if (mobilegluesOverrideEnabled) {
+        // NOLOAD never loads anything itself, so the handle only appears once the
+        // driver library is already resident; retry cheaply until then
+        static void *mobilegluesHandle;
+        if (mobilegluesHandle == NULL)
+            mobilegluesHandle = dlopen("libmobileglues.so", RTLD_NOLOAD);
+        if (mobilegluesHandle != NULL) {
+            void *direct = dlsym(mobilegluesHandle, proc);
+            if (direct != NULL) {
+                static int overrideLogged = 0;
+                if (!overrideLogged) {
+                    LOGI("Amethyst-Android: Serving SDL GL lookups from libmobileglues symbols for RenderPearl");
+                    overrideLogged = 1;
+                }
+                return direct;
             }
         }
-        // LWJGL grabs SDL_GL_GetProcAddress once through dlsym, hand it our wrapper so
-        // RenderPearl's address comparison stays consistent on the MobileGlues renderer
-        if ((redirect != NULL) && strcmp(symbol, "SDL_GL_GetProcAddress") == 0) {
-            if (real_SDL_GL_GetProcAddress == NULL) {
-                real_SDL_GL_GetProcAddress = (SDL_GL_GetProcAddress_t) result;
-                LOGI("Amethyst-Android: Intercepted SDL_GL_GetProcAddress: %p", result);
-            }
+    }
+    return real_SDL_GL_GetProcAddress(proc);
+}
+
+void *custom_dlsym(void *handle, const char *symbol) {
+    void *result = BYTEHOOK_CALL_PREV(
+            custom_dlsym,
+            dlsym_func_t,
+            handle,
+            symbol);
+    LibraryRedirect *redirect = get_redirect_by_handle(handle);
+    if ((redirect != NULL) && strcmp(symbol, "JNI_OnLoad") == 0) {
+        if (strstr(redirect->library_name, "libSDL3")) {
+            redirect->jni_onload = (JNI_OnLoad_t) result;
+            // This outputs in the minecraft logs
+            LOGI("Amethyst-Android: Intercepted dlsym on SDL3 JNI_OnLoad: %p", result);
             BYTEHOOK_POP_STACK();
-            return custom_SDL_GL_GetProcAddress_Func;
+            return get_jni_onload_wrapper(redirect);
+        }
+    }
+    // LWJGL grabs SDL_GL_GetProcAddress once through dlsym, hand it our wrapper so
+    // RenderPearl's address comparison stays consistent on the MobileGlues renderer
+    if ((redirect != NULL) && strcmp(symbol, "SDL_GL_GetProcAddress") == 0) {
+        if (real_SDL_GL_GetProcAddress == NULL) {
+            real_SDL_GL_GetProcAddress = (SDL_GL_GetProcAddress_t) result;
+            LOGI("Amethyst-Android: Intercepted SDL_GL_GetProcAddress: %p", result);
         }
         BYTEHOOK_POP_STACK();
-        return result;
+        return custom_SDL_GL_GetProcAddress_Func;
     }
+    BYTEHOOK_POP_STACK();
+    return result;
+}
 
 void create_dlopen_hooks(bytehook_hook_all_t bytehook_hook_all_p) {
     // FIXME: Hooking dlopen causes a crash with Turnip loader, so let's stop doing that entirely
