@@ -1,21 +1,38 @@
-name: Android CI
+# TEMPORARY fork-only workflow for Vivo-Y12/Amethyst-Android
+# Branch: btm-2.0    |    Not for upstream. Revert before any PR.
+#
+# Shape is taken from the `build-test` branch workflow that is empirically
+# known to work in this fork (runs #19/#21/#22 all green), NOT from the
+# btm-2.0 file, which builds assembleRelease first and dies there.
+#
+#   - debug only            -> no keystore secret, no gplay signing
+#   - no assembleRelease    -> that task is the blocker in a fork
+#   - push scoped to btm-2.0 -> no wasted runs on every branch
+#
+# Deliberate differences from the build-test reference (not a copy):
+#   * triggers scoped to this branch + manual dispatch
+#   * concurrency: a new push cancels the previous run
+#   * timeout-minutes, so a hung Gradle never eats 6h of minutes
+#   * APK resolved with `find` instead of a hardcoded filename
+#   * md5 + sha256, artefact retention, size/checksum in the job summary
+#   * artefact name without spaces/parentheses (easier `gh run download`)
+
+name: Android CI (fork build)
 
 on:
-  pull_request:
-    branches-ignore:
-      - 'l10n_v3_openjdk' 
-    types: [ opened, reopened ]
   push:
-    branches-ignore:
-      - 'l10n_v3_openjdk'
+    branches: [ btm-2.0 ]
   workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
+    name: Debug APK
     runs-on: ubuntu-22.04
-    env:
-      GPLAY_KEYSTORE_PASSWORD: ${{ secrets.GPLAY_KEYSTORE_PASSWORD }}
-      CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -23,11 +40,13 @@ jobs:
           submodules: "recursive"
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v3
+        uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: '21'
 
+      # Public repo, anonymous download. The launcher will not start without
+      # assets/components/jre, so this is not optional.
       - name: Get JRE 8
         uses: dawidd6/action-download-artifact@v9
         with:
@@ -38,37 +57,8 @@ jobs:
           branch: buildjre8
           name: jre8-pojav
 
-      # - name: Get JRE17
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-new
-      #     workflow_conclusion: completed
-      #     repo: AngelAuraMC/angelauramc-openjdk-build
-      #     branch: buildjre17-21
-      #     name: jre17-pojav
-      #
-      # - name: Get JRE21
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-21
-      #     workflow_conclusion: completed
-      #     repo: AngelAuraMC/angelauramc-openjdk-build
-      #     branch: buildjre17-21
-      #     name: jre21-pojav
-      #
-      # - name: Get JRE25
-      #   uses: dawidd6/action-download-artifact@v9
-      #   with:
-      #     workflow: build.yml
-      #     path: app_pojavlauncher/src/main/assets/components/jre-25
-      #     workflow_conclusion: completed
-      #     repo: FCL-Team/Android-OpenJDK-Build
-      #     branch: Build_JRE_25
-      #     name: jre25-multiarch
-
-      - uses: gradle/actions/setup-gradle@v4
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
           validate-wrappers: false
           gradle-version: "9.6.1"
@@ -76,36 +66,39 @@ jobs:
       - name: Run scripts
         run: |
           ./scripts/languagelist_updater.sh
-          mkdir out
+          mkdir -p out
 
-      - name: Build Release .apk
+      # Debug variant: customDebug signs with the committed debug.keystore and
+      # getCFApiKey() falls back to "DUMMY", so this needs zero repo secrets.
+      - name: Build Debug APK
         run: |
-          # Build the launcher
-          gradle :app_pojavlauncher:assembleRelease
-          mv app_pojavlauncher/build/outputs/apk/release/app_pojavlauncher-release.apk out/app-release.apk
+          gradle :app_pojavlauncher:assembleDebug --stacktrace
+          APK=$(find app_pojavlauncher/build/outputs/apk/debug -name '*.apk' | head -1)
+          test -n "$APK" || { echo "::error::assembleDebug produced no APK"; exit 1; }
+          cp "$APK" out/app-debug.apk
 
-      - name: Gen md5sums
+      - name: Checksums and summary
         run: |
-          md5sum out/app-release.apk > out/app-release.md5
+          cd out
+          md5sum app-debug.apk > app-debug.md5
+          sha256sum app-debug.apk > app-debug.sha256
+          ls -lh
+          {
+            echo "### Amethyst fork build — \`${{ github.ref_name }}\`"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Commit | \`${GITHUB_SHA:0:8}\` |"
+            echo "| Source | \`${{ github.event.head_commit.message || 'manual dispatch' }}\` |"
+            echo "| Size | $(du -h app-debug.apk | cut -f1) |"
+            echo "| md5 | \`$(cut -d' ' -f1 app-debug.md5)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Build Debug .apk
-        run: |
-          # Build the launcher
-          gradle :app_pojavlauncher:assembleDebug
-          mv app_pojavlauncher/build/outputs/apk/debug/app_pojavlauncher-debug.apk out/app-debug.apk
-
-      - name: Gen md5sums
-        run: |
-          md5sum out/app-debug.apk > out/app-debug.md5
-
-      - name: Upload debug APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug (recommended)
+          name: amethyst-debug-${{ github.run_number }}
           path: out/app-debug.*
-
-      - name: Upload release APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release
-          path: out/app-release.*
+          if-no-files-found: error
+          retention-days: 14
+          
